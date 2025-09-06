@@ -1,4 +1,4 @@
-import { CfnOutput, Duration } from 'aws-cdk-lib'
+import { CfnOutput, Duration, Stack, Fn, ArnFormat } from 'aws-cdk-lib'
 import { Bucket, StorageClass } from 'aws-cdk-lib/aws-s3'
 import {
   CfnWebACL,
@@ -28,10 +28,10 @@ export class SimpleWAF extends Construct {
 
     const { graphqlApiArn, environment } = props
 
-    // CloudWatch Log Group for WAF logs
+    // Create log group with proper WAF naming convention and 90-day retention
     this.logGroup = new LogGroup(this, 'WAFLogGroup', {
-      logGroupName: `/aws/wafv2/appsync/${environment}-waf-logs`,
-      retention: RetentionDays.ONE_WEEK, // Shorter retention for testing
+      logGroupName: `aws-waf-logs-${environment}-appsync`,
+      retention: RetentionDays.THREE_MONTHS, // 90 days as per JIRA requirements
     })
 
     // S3 Bucket for WAF log storage (optional for testing)
@@ -44,7 +44,7 @@ export class SimpleWAF extends Construct {
           transitions: [
             {
               storageClass: StorageClass.INFREQUENT_ACCESS,
-              transitionAfter: Duration.days(7),
+              transitionAfter: Duration.days(30),
             },
           ],
         },
@@ -124,33 +124,38 @@ export class SimpleWAF extends Construct {
       },
     })
 
-    // Associate WAF with AppSync GraphQL API
-    new CfnWebACLAssociation(this, 'WAFAssociation', {
-      resourceArn: graphqlApiArn,
-      webAclArn: this.webAcl.attrArn,
-    })
-
-    // Configure WAF logging
-    new CfnLoggingConfiguration(this, 'WAFLoggingConfig', {
+    // WAF logging configuration using imported log group
+    const loggingConfig = new CfnLoggingConfiguration(this, 'WAFLoggingConfig', {
       resourceArn: this.webAcl.attrArn,
-      logDestinationConfigs: [this.logGroup.logGroupArn],
+      logDestinationConfigs: [
+        // Use Stack.formatArn with COLON_RESOURCE_NAME to avoid :* suffix
+        Stack.of(this).formatArn({
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          service: 'logs',
+          resource: 'log-group',
+          resourceName: this.logGroup.logGroupName,
+        })
+      ],
       loggingFilter: {
-        defaultBehavior: 'KEEP',
-        filters: [
+        DefaultBehavior: 'KEEP',
+        Filters: [
           {
-            behavior: 'KEEP',
-            conditions: [
+            Behavior: 'KEEP',
+            Conditions: [
               {
-                actionCondition: {
-                  action: 'BLOCK',
+                ActionCondition: {
+                  Action: 'BLOCK',
                 },
               },
             ],
-            requirement: 'MEETS_ANY',
+            Requirement: 'MEETS_ANY',
           },
         ],
       },
     })
+    
+    loggingConfig.addDependency(this.webAcl)
+    loggingConfig.node.addDependency(this.logGroup)
 
     // Outputs for testing
     new CfnOutput(this, 'WebACLArn', {
@@ -163,6 +168,12 @@ export class SimpleWAF extends Construct {
       value: this.logGroup.logGroupName,
       description: 'CloudWatch Log Group for WAF logs',
       exportName: `${environment}-TestWAF-LogGroup`,
+    })
+
+    new CfnOutput(this, 'WAFLogGroupArn', {
+      value: this.logGroup.logGroupArn,
+      description: 'CloudWatch Log Group ARN for debugging',
+      exportName: `${environment}-TestWAF-LogGroupArn`,
     })
 
     new CfnOutput(this, 'WAFLogsBucketName', {
